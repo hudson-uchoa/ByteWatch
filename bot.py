@@ -26,16 +26,29 @@ logger.addHandler(file_handler)
 db_connection = sqlite3.connect('bytewatch.db')
 db_cursor = db_connection.cursor()
 
+# Table for study sessions (supports projects and AI tracking)
 db_cursor.execute('''
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
     status TEXT,
     language TEXT,
+    project_name TEXT,
     start_time REAL,
     accumulated REAL,
     ai_used TEXT,
     ai_time TEXT
+)
+''')
+
+# Table for user projects and progress tracking
+db_cursor.execute('''
+CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    name TEXT,
+    progress INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'ativo'
 )
 ''')
 db_connection.commit()
@@ -107,7 +120,7 @@ class DevBot(commands.Bot):
             summary_embed = discord.Embed(title="📊 Resumo Semanal de Estudos", color=discord.Color.purple(), timestamp=current_datetime)
             for row in query_results:
                 user_id, total_seconds, used_languages, used_ais = row
-                minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
+                minutes, seconds = divmod(int(round(total_seconds or 0)), 60)
                 hours, minutes = divmod(minutes, 60)
                 
                 member = self.get_user(int(user_id))
@@ -127,30 +140,47 @@ class DevBot(commands.Bot):
 bot_instance = DevBot()
 
 # ---------------------------------------------------------
-# MODALS AND VIEWS FOR /START (LANGUAGE SELECTION)
+# INTERACTIVE VIEWS FOR /START (PROJECT & LANGUAGE SELECTION)
 # ---------------------------------------------------------
 class CustomLanguageModal(discord.ui.Modal, title='Qual linguagem?'):
     language_input = discord.ui.TextInput(label='Nome da linguagem', style=discord.TextStyle.short, placeholder="Ex: Ruby, Go, Java...")
 
+    def __init__(self, project_name: str):
+        super().__init__()
+        self.project_name = project_name
+
     async def on_submit(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
         current_time = time.time()
-        db_cursor.execute("INSERT INTO sessions (user_id, status, language, start_time, accumulated) VALUES (?, ?, ?, ?, ?)",
-                       (user_id, 'ativo', self.language_input.value, current_time, 0.0))
+        db_cursor.execute("INSERT INTO sessions (user_id, status, language, project_name, start_time, accumulated, ai_used, ai_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (user_id, 'ativo', self.language_input.value, self.project_name, current_time, 0.0, '', ''))
         db_connection.commit()
-        await interaction.response.edit_message(content=f"⏱️ Cronômetro iniciado para **{self.language_input.value}**! Bom código!", view=None)
+        
+        msg = (
+            f"⏱️ Sessão iniciada no projeto **{self.project_name}** usando **{self.language_input.value}**! Bons estudos!\n"
+            f"💡 *Dica: Quer ver quanto tempo já passou sem parar o cronômetro? Use `/status` a qualquer momento!*"
+        )
+        await interaction.response.edit_message(content=msg, view=None)
 
 class LanguageSelectionView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, project_name: str):
         super().__init__(timeout=None)
+        self.project_name = project_name
+
+        db_cursor.execute("SELECT id, name FROM projects WHERE status = 'ativo'")
 
     async def initialize_session(self, interaction: discord.Interaction, selected_language: str):
         user_id = str(interaction.user.id)
         current_time = time.time()
-        db_cursor.execute("INSERT INTO sessions (user_id, status, language, start_time, accumulated) VALUES (?, ?, ?, ?, ?)",
-                       (user_id, 'ativo', selected_language, current_time, 0.0))
+        db_cursor.execute("INSERT INTO sessions (user_id, status, language, project_name, start_time, accumulated, ai_used, ai_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (user_id, 'ativo', selected_language, self.project_name, current_time, 0.0, '', ''))
         db_connection.commit()
-        await interaction.response.edit_message(content=f"⏱️ Cronômetro iniciado para **{selected_language}**! Bom código!", view=None)
+        
+        msg = (
+            f"⏱️ Sessão iniciada no projeto **{self.project_name}** usando **{selected_language}**! Bons estudos!\n"
+            f"💡 *Dica: Quer ver quanto tempo já passou sem parar o cronômetro? Use `/status` a qualquer momento!*"
+        )
+        await interaction.response.edit_message(content=msg, view=None)
 
     @discord.ui.button(label="PHP", emoji="🐘", style=discord.ButtonStyle.secondary, row=0)
     async def button_php(self, interaction: discord.Interaction, button: discord.ui.Button): 
@@ -174,7 +204,24 @@ class LanguageSelectionView(discord.ui.View):
 
     @discord.ui.button(label="Outra...", emoji="⌨️", style=discord.ButtonStyle.primary, row=1)
     async def button_custom(self, interaction: discord.Interaction, button: discord.ui.Button): 
-        await interaction.response.send_modal(CustomLanguageModal())
+        await interaction.response.edit_message(content=f"⏱️ Escolha a linguagem para o projeto **{self.project_name}**:", view=None)
+        await interaction.followup.send_modal(CustomLanguageModal(self.project_name))
+
+class ProjectSelectionView(discord.ui.View):
+    def __init__(self, projects: list):
+        super().__init__(timeout=None)
+        # Adds buttons for each project found in database (up to 5)
+        for proj in projects[:5]:
+            proj_name = proj[1]
+            btn = discord.ui.button(label=proj_name, emoji="📁", style=discord.ButtonStyle.secondary)
+            async def callback(interaction: discord.Interaction, name=proj_name):
+                await interaction.response.edit_message(content=f"📁 Projeto selecionado: **{name}**\n\nAgora, escolha a linguagem de programação:", view=LanguageSelectionView(name))
+            btn.callback = callback
+            self.add_item(btn)
+
+    @discord.ui.button(label="Estudo Livre (Sem Projeto)", emoji="🚀", style=discord.ButtonStyle.primary, row=1)
+    async def button_free_study(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="🚀 Modo **Estudo Livre** selecionado.\n\nAgora, escolha a linguagem de programação:", view=LanguageSelectionView("Estudo Livre"))
 
 # ---------------------------------------------------------
 # MODALS AND VIEWS FOR /STOP (AI SELECTION)
@@ -182,25 +229,32 @@ class LanguageSelectionView(discord.ui.View):
 class AITimeModal(discord.ui.Modal):
     ai_duration_input = discord.ui.TextInput(label='Tempo na IA? (em min)', required=True, placeholder="Ex: 15")
 
-    def __init__(self, session_id: int, total_duration_seconds: float, session_language: str, ai_identifier: str):
+    def __init__(self, session_id: int, total_duration_seconds: float, session_language: str, ai_identifier: str, project_name: str):
         super().__init__(title=f'Uso do {ai_identifier}')
         self.session_id = session_id
         self.total_duration_seconds = total_duration_seconds
         self.session_language = session_language
         self.ai_identifier = ai_identifier
+        self.project_name = project_name
 
     async def on_submit(self, interaction: discord.Interaction):
+        ai_mins = self.ai_duration_input.value
         db_cursor.execute("UPDATE sessions SET status = 'finalizado', accumulated = ?, ai_used = ?, ai_time = ? WHERE id = ?", 
-                       (self.total_duration_seconds, self.ai_identifier, self.ai_duration_input.value, self.session_id))
+                       (self.total_duration_seconds, self.ai_identifier, ai_mins, self.session_id))
         db_connection.commit()
         
-        minutes, seconds = divmod(int(self.total_duration_seconds), 60)
+        minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
         hours, minutes = divmod(minutes, 60)
         
+        # Calculate AI percentage usage
+        ai_secs = float(ai_mins) * 60 if ai_mins.isdigit() else 0.0
+        ai_percentage = (ai_secs / self.total_duration_seconds) * 100 if self.total_duration_seconds > 0 else 0
+        
         result_embed = discord.Embed(title="✅ Sessão Finalizada", color=discord.Color.green())
+        result_embed.add_field(name="Projeto", value=self.project_name, inline=True)
         result_embed.add_field(name="Linguagem", value=self.session_language, inline=True)
         result_embed.add_field(name="Tempo Total", value=f"{hours}h {minutes}m {seconds}s", inline=True)
-        result_embed.add_field(name="IA Utilizada", value=f"{self.ai_identifier} ({self.ai_duration_input.value} min)", inline=False)
+        result_embed.add_field(name="IA Utilizada", value=f"{self.ai_identifier} ({ai_mins} min - {ai_percentage:.1f}% do tempo)", inline=False)
         
         await interaction.response.edit_message(content=None, embed=result_embed, view=None)
 
@@ -208,36 +262,44 @@ class CustomAIModal(discord.ui.Modal, title='Qual IA você usou?'):
     custom_ai_input = discord.ui.TextInput(label='Nome da IA', required=True, placeholder="Ex: Tabnine, Llama...")
     ai_duration_input = discord.ui.TextInput(label='Tempo na IA? (em min)', required=True, placeholder="Ex: 15")
 
-    def __init__(self, session_id: int, total_duration_seconds: float, session_language: str):
+    def __init__(self, session_id: int, total_duration_seconds: float, session_language: str, project_name: str):
         super().__init__()
         self.session_id = session_id
         self.total_duration_seconds = total_duration_seconds
         self.session_language = session_language
+        self.project_name = project_name
 
     async def on_submit(self, interaction: discord.Interaction):
+        ai_mins = self.ai_duration_input.value
+        ai_name = self.custom_ai_input.value
         db_cursor.execute("UPDATE sessions SET status = 'finalizado', accumulated = ?, ai_used = ?, ai_time = ? WHERE id = ?", 
-                       (self.total_duration_seconds, self.custom_ai_input.value, self.ai_duration_input.value, self.session_id))
+                       (self.total_duration_seconds, ai_name, ai_mins, self.session_id))
         db_connection.commit()
         
-        minutes, seconds = divmod(int(self.total_duration_seconds), 60)
+        minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
         hours, minutes = divmod(minutes, 60)
         
+        ai_secs = float(ai_mins) * 60 if ai_mins.isdigit() else 0.0
+        ai_percentage = (ai_secs / self.total_duration_seconds) * 100 if self.total_duration_seconds > 0 else 0
+        
         result_embed = discord.Embed(title="✅ Sessão Finalizada", color=discord.Color.green())
+        result_embed.add_field(name="Projeto", value=self.project_name, inline=True)
         result_embed.add_field(name="Linguagem", value=self.session_language, inline=True)
         result_embed.add_field(name="Tempo Total", value=f"{hours}h {minutes}m {seconds}s", inline=True)
-        result_embed.add_field(name="IA Utilizada", value=f"{self.custom_ai_input.value} ({self.ai_duration_input.value} min)", inline=False)
+        result_embed.add_field(name="IA Utilizada", value=f"{ai_name} ({ai_mins} min - {ai_percentage:.1f}% do tempo)", inline=False)
         
         await interaction.response.edit_message(content=None, embed=result_embed, view=None)
 
 class StopSessionView(discord.ui.View):
-    def __init__(self, session_id: int, total_duration_seconds: float, session_language: str):
+    def __init__(self, session_id: int, total_duration_seconds: float, session_language: str, project_name: str):
         super().__init__(timeout=None)
         self.session_id = session_id
         self.total_duration_seconds = total_duration_seconds
         self.session_language = session_language
+        self.project_name = project_name
 
     async def finalize_session_with_ai(self, interaction: discord.Interaction, selected_ai: str):
-        await interaction.response.send_modal(AITimeModal(self.session_id, self.total_duration_seconds, self.session_language, selected_ai))
+        await interaction.response.send_modal(AITimeModal(self.session_id, self.total_duration_seconds, self.session_language, selected_ai, self.project_name))
 
     @discord.ui.button(label="ChatGPT", emoji="🤖", style=discord.ButtonStyle.secondary, row=0)
     async def button_chatgpt(self, interaction: discord.Interaction, button: discord.ui.Button): 
@@ -261,7 +323,7 @@ class StopSessionView(discord.ui.View):
 
     @discord.ui.button(label="Outra IA...", emoji="⌨️", style=discord.ButtonStyle.primary, row=1)
     async def button_custom_ai(self, interaction: discord.Interaction, button: discord.ui.Button): 
-        await interaction.response.send_modal(CustomAIModal(self.session_id, self.total_duration_seconds, self.session_language))
+        await interaction.response.send_modal(CustomAIModal(self.session_id, self.total_duration_seconds, self.session_language, self.project_name))
 
     @discord.ui.button(label="Não usei IA", emoji="🚫", style=discord.ButtonStyle.danger, row=1)
     async def button_no_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -269,27 +331,62 @@ class StopSessionView(discord.ui.View):
                        (self.total_duration_seconds, self.session_id))
         db_connection.commit()
 
-        minutes, seconds = divmod(int(self.total_duration_seconds), 60)
+        minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
         hours, minutes = divmod(minutes, 60)
         
         result_embed = discord.Embed(title="✅ Sessão Finalizada", color=discord.Color.green())
+        result_embed.add_field(name="Projeto", value=self.project_name, inline=True)
         result_embed.add_field(name="Linguagem", value=self.session_language, inline=True)
         result_embed.add_field(name="Tempo Total", value=f"{hours}h {minutes}m {seconds}s", inline=True)
-        result_embed.add_field(name="IA Utilizada", value="Nenhuma 🚫", inline=False)
+        result_embed.add_field(name="IA Utilizada", value="Nenhuma (0.0% do tempo) 🚫", inline=False)
         
         await interaction.response.edit_message(content=None, embed=result_embed, view=None)
 
 # ---------------------------------------------------------
 # SLASH COMMANDS (/)
 # ---------------------------------------------------------
-@bot_instance.tree.command(name="start", description="Começa a contar o tempo da sessão.")
+@bot_instance.tree.command(name="start", description="Começa a contar o tempo da sessão num projeto.")
 async def command_start(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     db_cursor.execute("SELECT id FROM sessions WHERE user_id = ? AND status != 'finalizado'", (user_id,))
     if db_cursor.fetchone():
         await interaction.response.send_message("⚠️ Você já tem uma sessão em andamento! Use /stop ou /pause.", ephemeral=True)
         return
-    await interaction.response.send_message("⏱️ Qual linguagem você vai estudar agora?", view=LanguageSelectionView(), ephemeral=False)
+    
+    # Fetch user projects
+    db_cursor.execute("SELECT id, name FROM projects WHERE user_id = ? AND status = 'ativo'", (user_id,))
+    user_projects = db_cursor.fetchall()
+    
+    await interaction.response.send_message("📁 **Qual projeto você vai focar agora?**", view=ProjectSelectionView(user_projects), ephemeral=False)
+
+@bot_instance.tree.command(name="status", description="Mostra o andamento da sessão atual em tempo real.")
+async def command_status(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    db_cursor.execute("SELECT status, language, project_name, start_time, accumulated FROM sessions WHERE user_id = ? AND status != 'finalizado'", (user_id,))
+    session = db_cursor.fetchone()
+    
+    if not session:
+        await interaction.response.send_message("❌ Você não tem nenhuma sessão em andamento no momento.", ephemeral=True)
+        return
+        
+    status, language, project_name, start_time, accumulated = session
+    
+    current_duration = accumulated
+    if status == 'ativo':
+        current_duration += (time.time() - start_time)
+        
+    minutes, seconds = divmod(int(round(current_duration)), 60)
+    hours, minutes = divmod(minutes, 60)
+    
+    status_icon = "▶️ Ativo" if status == 'ativo' else "⏸️ Pausado"
+    
+    status_embed = discord.Embed(title="⏱️ Status da Sessão Atual", color=discord.Color.blue())
+    status_embed.add_field(name="Projeto", value=project_name or "Estudo Livre", inline=True)
+    status_embed.add_field(name="Linguagem", value=language, inline=True)
+    status_embed.add_field(name="Estado", value=status_icon, inline=True)
+    status_embed.add_field(name="Tempo Decorrido", value=f"{hours}h {minutes}m {seconds}s", inline=False)
+    
+    await interaction.response.send_message(embed=status_embed, ephemeral=True)
 
 @bot_instance.tree.command(name="pause", description="Pausa o contador (por no máximo 2 horas).")
 async def command_pause(interaction: discord.Interaction):
@@ -311,46 +408,52 @@ async def command_pause(interaction: discord.Interaction):
 @bot_instance.tree.command(name="resume", description="Resume o contador parado.")
 async def command_resume(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
-    db_cursor.execute("SELECT id, language FROM sessions WHERE user_id = ? AND status = 'pausado'", (user_id,))
+    db_cursor.execute("SELECT id, language, project_name FROM sessions WHERE user_id = ? AND status = 'pausado'", (user_id,))
     paused_session = db_cursor.fetchone()
     if not paused_session:
         await interaction.response.send_message("❌ Você não tem nenhuma sessão pausada.", ephemeral=True)
         return
         
-    session_id, session_language = paused_session
+    session_id, session_language, project_name = paused_session
     db_cursor.execute("UPDATE sessions SET status = 'ativo', start_time = ? WHERE id = ?", (time.time(), session_id))
     db_connection.commit()
-    await interaction.response.send_message(f"▶️ Sessão de **{session_language}** retomada!", ephemeral=False)
+    await interaction.response.send_message(f"▶️ Sessão de **{session_language}** no projeto **{project_name}** retomada!", ephemeral=False)
 
 @bot_instance.tree.command(name="stop", description="Finaliza a sessão atual.")
 async def command_stop(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
-    db_cursor.execute("SELECT id, status, start_time, accumulated, language FROM sessions WHERE user_id = ? AND status != 'finalizado'", (user_id,))
+    db_cursor.execute("SELECT id, status, start_time, accumulated, language, project_name FROM sessions WHERE user_id = ? AND status != 'finalizado'", (user_id,))
     ongoing_session = db_cursor.fetchone()
     if not ongoing_session:
         await interaction.response.send_message("❌ Você não tem nenhuma sessão em andamento.", ephemeral=True)
         return
         
-    session_id, session_status, start_time, accumulated_time, session_language = ongoing_session
+    session_id, session_status, start_time, accumulated_time, session_language, project_name = ongoing_session
     total_duration = accumulated_time
     if session_status == 'ativo':
         total_duration += (time.time() - start_time)
         
-    await interaction.response.send_message("🛑 Sessão pausada para finalização.\n\n**Qual IA você usou para te ajudar hoje?**", view=StopSessionView(session_id, total_duration, session_language), ephemeral=False)
+    await interaction.response.send_message(f"🛑 Sessão do projeto **{project_name}** pausada para finalização.\n\n**Qual IA você usou para te ajudar hoje?**", view=StopSessionView(session_id, total_duration, session_language, project_name), ephemeral=False)
 
-@bot_instance.tree.command(name="ranking", description="Mostra o total de horas registradas na semana.")
+@bot_instance.tree.command(name="ranking", description="Mostra o total de horas registradas na semana e uso de IA.")
 async def command_ranking(interaction: discord.Interaction):
     current_date = datetime.datetime.now()
     start_of_week = (current_date - datetime.timedelta(days=current_date.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     
-    db_cursor.execute("SELECT user_id, SUM(accumulated) as total FROM sessions WHERE status = 'finalizado' AND start_time >= ? GROUP BY user_id ORDER BY total DESC", (start_of_week.timestamp(),))
+    db_cursor.execute("""
+        SELECT user_id, SUM(accumulated) as total_time, SUM(CASE WHEN ai_time != '0' AND ai_time != '' THEN CAST(ai_time AS REAL) * 60 ELSE 0 END) as total_ai
+        FROM sessions 
+        WHERE status = 'finalizado' AND start_time >= ? 
+        GROUP BY user_id 
+        ORDER BY total_time DESC
+    """, (start_of_week.timestamp(),))
     ranking_results = db_cursor.fetchall()
 
     if not ranking_results:
         await interaction.response.send_message("📊 Ainda não há horas registradas nesta semana. Bora codar!", ephemeral=False)
         return
 
-    ranking_embed = discord.Embed(title="🏆 Ranking da Semana", description="Total de horas estudadas desde segunda-feira:", color=discord.Color.gold())
+    ranking_embed = discord.Embed(title="🏆 Ranking da Semana & Análise de IA", description="Total de tempo estudado e proporção de uso de Inteligência Artificial:", color=discord.Color.gold())
     
     top1_id = ranking_results[0][0]
     top1_user = bot_instance.get_user(int(top1_id))
@@ -367,20 +470,69 @@ async def command_ranking(interaction: discord.Interaction):
     medalhas = ["🥇", "🥈", "🥉"]
 
     for row in ranking_results:
-        user_id, total_seconds = row
-        minutes, seconds = divmod(int(round(total_seconds or 0)), 60)
+        user_id, total_seconds, total_ai_seconds = row
+        total_seconds = total_seconds or 0
+        total_ai_seconds = total_ai_seconds or 0
+        
+        minutes, seconds = divmod(int(round(total_seconds)), 60)
         hours, minutes = divmod(minutes, 60)
+        
+        ai_percentage = (total_ai_seconds / total_seconds) * 100 if total_seconds > 0 else 0
         
         medalha = medalhas[posicao - 1] if posicao <= 3 else "🏅"
         
         ranking_embed.add_field(
             name=f"{medalha} {posicao}º Lugar", 
-            value=f"**Dev:** <@{user_id}>\n**Tempo:** {hours}h {minutes}m {seconds}s", 
+            value=f"**Dev:** <@{user_id}>\n⏱️ **Tempo Total:** {hours}h {minutes}m {seconds}s\n🤖 **Dependência de IA:** {ai_percentage:.1f}% do tempo", 
             inline=False
         )
         posicao += 1
 
     await interaction.response.send_message(embed=ranking_embed)
+
+# Project management group
+project_group = app_commands.Group(name="project", description="Gerencie seus projetos de estudo.")
+
+@project_group.command(name="create", description="Cria um novo projeto para focar seus estudos.")
+@app_commands.describe(name="Nome do projeto (ex: MeuE-commerce, BotDiscord)")
+async def project_create(interaction: discord.Interaction, name: str):
+    user_id = str(interaction.user.id)
+    db_cursor.execute("INSERT INTO projects (user_id, name, progress, status) VALUES (?, ?, 0, 'ativo')", (user_id, name))
+    db_connection.commit()
+    await interaction.response.send_message(f"📁 Projeto **{name}** criado com sucesso! Use `/start` para iniciar sessões nele.", ephemeral=True)
+
+@project_group.command(name="progress", description="Atualiza a porcentagem de conclusão de um projeto.")
+@app_commands.describe(name="Nome exato do projeto", percentage="Porcentagem de 0 a 100")
+async def project_progress(interaction: discord.Interaction, name: str, percentage: int):
+    if not (0 <= percentage <= 100):
+        await interaction.response.send_message("⚠️ A porcentagem deve estar entre 0 e 100.", ephemeral=True)
+        return
+        
+    user_id = str(interaction.user.id)
+    db_cursor.execute("UPDATE projects SET progress = ? WHERE user_id = ? AND name = ?", (percentage, user_id, name))
+    db_connection.commit()
+    await interaction.response.send_message(f"📈 Projeto **{name}** atualizado para **{percentage}%** de conclusão!", ephemeral=False)
+
+@project_group.command(name="list", description="Lista todos os seus projetos ativos e suas porcentagens.")
+async def project_list(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    db_cursor.execute("SELECT name, progress FROM projects WHERE user_id = ? AND status = 'ativo'", (user_id,))
+    projects = db_cursor.fetchall()
+    
+    if not projects:
+        await interaction.response.send_message("📁 Você ainda não cadastrou nenhum projeto. Use `/project create` para criar um!", ephemeral=True)
+        return
+        
+    embed = discord.Embed(title="📁 Seus Projetos Ativos", color=discord.Color.dark_purple())
+    for name, progress in projects:
+        # Progress bar visual helper
+        filled_blocks = int(progress // 10)
+        bar = "🟩" * filled_blocks + "⬜" * (10 - filled_blocks)
+        embed.add_field(name=f"📌 {name}", value=f"Progresso: {progress}%\n{bar}", inline=False)
+        
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+bot_instance.tree.add_command(project_group)
 
 # ---------------------------------------------------------
 # INITIALIZATION
