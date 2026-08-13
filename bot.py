@@ -107,7 +107,7 @@ class DevBot(commands.Bot):
             summary_embed = discord.Embed(title="📊 Resumo Semanal de Estudos", color=discord.Color.purple(), timestamp=current_datetime)
             for row in query_results:
                 user_id, total_seconds, used_languages, used_ais = row
-                minutes, seconds = divmod(int(total_seconds or 0), 60)
+                minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
                 hours, minutes = divmod(minutes, 60)
                 
                 member = self.get_user(int(user_id))
@@ -343,7 +343,7 @@ async def command_ranking(interaction: discord.Interaction):
     current_date = datetime.datetime.now()
     start_of_week = (current_date - datetime.timedelta(days=current_date.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     
-    db_cursor.execute("SELECT user_id, SUM(accumulated) FROM sessions WHERE status = 'finalizado' AND start_time >= ? GROUP BY user_id", (start_of_week.timestamp(),))
+    db_cursor.execute("SELECT user_id, SUM(accumulated) as total FROM sessions WHERE status = 'finalizado' AND start_time >= ? GROUP BY user_id ORDER BY total DESC", (start_of_week.timestamp(),))
     ranking_results = db_cursor.fetchall()
 
     if not ranking_results:
@@ -352,21 +352,33 @@ async def command_ranking(interaction: discord.Interaction):
 
     ranking_embed = discord.Embed(title="🏆 Ranking da Semana", description="Total de horas estudadas desde segunda-feira:", color=discord.Color.gold())
     
+    top1_id = ranking_results[0][0]
+    top1_user = bot_instance.get_user(int(top1_id))
+    if not top1_user:
+        try:
+            top1_user = await bot_instance.fetch_user(int(top1_id))
+        except:
+            pass
+            
+    if top1_user and top1_user.display_avatar:
+        ranking_embed.set_thumbnail(url=top1_user.display_avatar.url)
+
+    posicao = 1
+    medalhas = ["🥇", "🥈", "🥉"]
+
     for row in ranking_results:
         user_id, total_seconds = row
-        minutes, seconds = divmod(int(total_seconds or 0), 60)
+        minutes, seconds = divmod(int(round(total_seconds or 0)), 60)
         hours, minutes = divmod(minutes, 60)
         
-        member = bot_instance.get_user(int(user_id))
-        if not member:
-            try:
-                member = await bot_instance.fetch_user(int(user_id))
-            except:
-                pass
-                
-        member_name = member.name if member else f"Dev {user_id}"
+        medalha = medalhas[posicao - 1] if posicao <= 3 else "🏅"
         
-        ranking_embed.add_field(name=f"👤 {member_name}", value=f"**Tempo:** {hours}h {minutes}m {seconds}s", inline=False)
+        ranking_embed.add_field(
+            name=f"{medalha} {posicao}º Lugar", 
+            value=f"**Dev:** <@{user_id}>\n**Tempo:** {hours}h {minutes}m {seconds}s", 
+            inline=False
+        )
+        posicao += 1
 
     await interaction.response.send_message(embed=ranking_embed)
 
