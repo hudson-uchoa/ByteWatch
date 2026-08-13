@@ -26,7 +26,6 @@ logger.addHandler(file_handler)
 db_connection = sqlite3.connect('bytewatch.db')
 db_cursor = db_connection.cursor()
 
-# Table for study sessions (supports projects and AI tracking)
 db_cursor.execute('''
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +40,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 )
 ''')
 
-# Table for user projects and progress tracking
 db_cursor.execute('''
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +50,12 @@ CREATE TABLE IF NOT EXISTS projects (
 )
 ''')
 db_connection.commit()
+
+try:
+    db_cursor.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT")
+    db_connection.commit()
+except sqlite3.OperationalError:
+    pass
 
 # ---------------------------------------------------------
 # MAIN BOT CLASS
@@ -167,8 +171,6 @@ class LanguageSelectionView(discord.ui.View):
         super().__init__(timeout=None)
         self.project_name = project_name
 
-        db_cursor.execute("SELECT id, name FROM projects WHERE status = 'ativo'")
-
     async def initialize_session(self, interaction: discord.Interaction, selected_language: str):
         user_id = str(interaction.user.id)
         current_time = time.time()
@@ -210,14 +212,21 @@ class LanguageSelectionView(discord.ui.View):
 class ProjectSelectionView(discord.ui.View):
     def __init__(self, projects: list):
         super().__init__(timeout=None)
-        # Adds buttons for each project found in database (up to 5)
+        
+        # Instancia botões dinâmicos corretamente usando discord.ui.Button
         for proj in projects[:5]:
             proj_name = proj[1]
-            btn = discord.ui.button(label=proj_name, emoji="📁", style=discord.ButtonStyle.secondary)
-            async def callback(interaction: discord.Interaction, name=proj_name):
-                await interaction.response.edit_message(content=f"📁 Projeto selecionado: **{name}**\n\nAgora, escolha a linguagem de programação:", view=LanguageSelectionView(name))
-            btn.callback = callback
-            self.add_item(btn)
+            button = discord.ui.Button(label=proj_name, emoji="📁", style=discord.ButtonStyle.secondary)
+            
+            # Função de callback interna para capturar o escopo correto do nome do projeto
+            async def make_callback(interaction: discord.Interaction, name=proj_name):
+                await interaction.response.edit_message(
+                    content=f"📁 Projeto selecionado: **{name}**\n\nAgora, escolha a linguagem de programação:",
+                    view=LanguageSelectionView(name)
+                )
+                
+            button.callback = make_callback
+            self.add_item(button)
 
     @discord.ui.button(label="Estudo Livre (Sem Projeto)", emoji="🚀", style=discord.ButtonStyle.primary, row=1)
     async def button_free_study(self, interaction: discord.Interaction, button: discord.ui.Button):
