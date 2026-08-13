@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS projects (
 ''')
 db_connection.commit()
 
+# Ensure project_name column exists for older database versions
 try:
     db_cursor.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT")
     db_connection.commit()
@@ -213,12 +214,10 @@ class ProjectSelectionView(discord.ui.View):
     def __init__(self, projects: list):
         super().__init__(timeout=None)
         
-        # Instancia botões dinâmicos corretamente usando discord.ui.Button
         for proj in projects[:5]:
             proj_name = proj[1]
             button = discord.ui.Button(label=proj_name, emoji="📁", style=discord.ButtonStyle.secondary)
             
-            # Função de callback interna para capturar o escopo correto do nome do projeto
             async def make_callback(interaction: discord.Interaction, name=proj_name):
                 await interaction.response.edit_message(
                     content=f"📁 Projeto selecionado: **{name}**\n\nAgora, escolha a linguagem de programação:",
@@ -255,7 +254,6 @@ class AITimeModal(discord.ui.Modal):
         minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
         hours, minutes = divmod(minutes, 60)
         
-        # Calculate AI percentage usage
         ai_secs = float(ai_mins) * 60 if ai_mins.isdigit() else 0.0
         ai_percentage = (ai_secs / self.total_duration_seconds) * 100 if self.total_duration_seconds > 0 else 0
         
@@ -362,7 +360,6 @@ async def command_start(interaction: discord.Interaction):
         await interaction.response.send_message("⚠️ Você já tem uma sessão em andamento! Use /stop ou /pause.", ephemeral=True)
         return
     
-    # Fetch user projects
     db_cursor.execute("SELECT id, name FROM projects WHERE user_id = ? AND status = 'ativo'", (user_id,))
     user_projects = db_cursor.fetchall()
     
@@ -444,13 +441,14 @@ async def command_stop(interaction: discord.Interaction):
         
     await interaction.response.send_message(f"🛑 Sessão do projeto **{project_name}** pausada para finalização.\n\n**Qual IA você usou para te ajudar hoje?**", view=StopSessionView(session_id, total_duration, session_language, project_name), ephemeral=False)
 
-@bot_instance.tree.command(name="ranking", description="Mostra o total de horas registradas na semana e uso de IA.")
+@bot_instance.tree.command(name="ranking", description="Mostra o ranking da semana, linguagens e dependência de IA.")
 async def command_ranking(interaction: discord.Interaction):
     current_date = datetime.datetime.now()
     start_of_week = (current_date - datetime.timedelta(days=current_date.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     
     db_cursor.execute("""
-        SELECT user_id, SUM(accumulated) as total_time, SUM(CASE WHEN ai_time != '0' AND ai_time != '' THEN CAST(ai_time AS REAL) * 60 ELSE 0 END) as total_ai
+        SELECT user_id, SUM(accumulated) as total_time, 
+               SUM(CASE WHEN ai_time != '0' AND ai_time != '' THEN CAST(ai_time AS REAL) * 60 ELSE 0 END) as total_ai
         FROM sessions 
         WHERE status = 'finalizado' AND start_time >= ? 
         GROUP BY user_id 
@@ -462,7 +460,7 @@ async def command_ranking(interaction: discord.Interaction):
         await interaction.response.send_message("📊 Ainda não há horas registradas nesta semana. Bora codar!", ephemeral=False)
         return
 
-    ranking_embed = discord.Embed(title="🏆 Ranking da Semana & Análise de IA", description="Total de tempo estudado e proporção de uso de Inteligência Artificial:", color=discord.Color.gold())
+    ranking_embed = discord.Embed(title="🏆 Ranking da Semana & Estatísticas", description="Total de tempo, proporção de linguagens e dependência de IA:", color=discord.Color.gold())
     
     top1_id = ranking_results[0][0]
     top1_user = bot_instance.get_user(int(top1_id))
@@ -487,12 +485,29 @@ async def command_ranking(interaction: discord.Interaction):
         hours, minutes = divmod(minutes, 60)
         
         ai_percentage = (total_ai_seconds / total_seconds) * 100 if total_seconds > 0 else 0
-        
         medalha = medalhas[posicao - 1] if posicao <= 3 else "🏅"
+        
+        # Fetch language breakdown for this user this week
+        db_cursor.execute("""
+            SELECT language, SUM(accumulated) as lang_time
+            FROM sessions
+            WHERE user_id = ? AND status = 'finalizado' AND start_time >= ?
+            GROUP BY language
+            ORDER BY lang_time DESC
+        """, (user_id, start_of_week.timestamp()))
+        lang_results = db_cursor.fetchall()
+        
+        lang_details = []
+        for lang, lang_sec in lang_results:
+            lang_sec = lang_sec or 0
+            lang_pct = (lang_sec / total_seconds) * 100 if total_seconds > 0 else 0
+            lang_details.append(f"{lang} ({lang_pct:.1f}%)")
+            
+        formatted_langs = " • ".join(lang_details) if lang_details else "N/A"
         
         ranking_embed.add_field(
             name=f"{medalha} {posicao}º Lugar", 
-            value=f"**Dev:** <@{user_id}>\n⏱️ **Tempo Total:** {hours}h {minutes}m {seconds}s\n🤖 **Dependência de IA:** {ai_percentage:.1f}% do tempo", 
+            value=f"**Dev:** <@{user_id}>\n⏱️ **Tempo Total:** {hours}h {minutes}m {seconds}s\n💻 **Linguagens:** {formatted_langs}\n🤖 **Dependência de IA:** {ai_percentage:.1f}%", 
             inline=False
         )
         posicao += 1
@@ -509,6 +524,35 @@ async def project_create(interaction: discord.Interaction, name: str):
     db_cursor.execute("INSERT INTO projects (user_id, name, progress, status) VALUES (?, ?, 0, 'ativo')", (user_id, name))
     db_connection.commit()
     await interaction.response.send_message(f"📁 Projeto **{name}** criado com sucesso! Use `/start` para iniciar sessões nele.", ephemeral=True)
+
+@project_group.command(name="rename", description="Altera o nome de um projeto existente.")
+@app_commands.describe(old_name="Nome atual do projeto", new_name="Novo nome para o projeto")
+async def project_rename(interaction: discord.Interaction, old_name: str, new_name: str):
+    user_id = str(interaction.user.id)
+    
+    db_cursor.execute("SELECT id FROM projects WHERE user_id = ? AND name = ?", (user_id, old_name))
+    if not db_cursor.fetchone():
+        await interaction.response.send_message(f"❌ Nenhum projeto com o nome **{old_name}** foi encontrado.", ephemeral=True)
+        return
+        
+    db_cursor.execute("UPDATE projects SET name = ? WHERE user_id = ? AND name = ?", (new_name, user_id, old_name))
+    db_cursor.execute("UPDATE sessions SET project_name = ? WHERE user_id = ? AND project_name = ?", (new_name, user_id, old_name))
+    db_connection.commit()
+    
+    await interaction.response.send_message(f"✏️ Projeto **{old_name}** renomeado para **{new_name}** com sucesso!", ephemeral=False)
+
+@project_group.command(name="delete", description="Exclui um projeto existente.")
+@app_commands.describe(name="Nome exato do projeto que deseja excluir")
+async def project_delete(interaction: discord.Interaction, name: str):
+    user_id = str(interaction.user.id)
+    
+    db_cursor.execute("DELETE FROM projects WHERE user_id = ? AND name = ?", (user_id, name))
+    if db_cursor.rowcount == 0:
+        db_connection.commit()
+        await interaction.response.send_message(f"❌ Nenhum projeto com o nome **{name}** foi encontrado para exclusão.", ephemeral=True)
+    else:
+        db_connection.commit()
+        await interaction.response.send_message(f"🗑️ Projeto **{name}** excluído com sucesso!", ephemeral=False)
 
 @project_group.command(name="progress", description="Atualiza a porcentagem de conclusão de um projeto.")
 @app_commands.describe(name="Nome exato do projeto", percentage="Porcentagem de 0 a 100")
@@ -534,7 +578,6 @@ async def project_list(interaction: discord.Interaction):
         
     embed = discord.Embed(title="📁 Seus Projetos Ativos", color=discord.Color.dark_purple())
     for name, progress in projects:
-        # Progress bar visual helper
         filled_blocks = int(progress // 10)
         bar = "🟩" * filled_blocks + "⬜" * (10 - filled_blocks)
         embed.add_field(name=f"📌 {name}", value=f"Progresso: {progress}%\n{bar}", inline=False)
