@@ -5,6 +5,7 @@ import datetime
 import sqlite3
 import time
 import os
+import aiohttp  # <-- Adicionado para a API da NVIDIA
 from dotenv import load_dotenv
 import logging
 
@@ -59,6 +60,42 @@ except sqlite3.OperationalError:
     pass
 
 # ---------------------------------------------------------
+# NVIDIA IA CONFIGURATION
+# ---------------------------------------------------------
+NVIDIA_API_TOKEN = os.getenv("NVIDIA_API_TOKEN")
+NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+
+async def ask_nvidia(prompt: str) -> str:
+    if not NVIDIA_API_TOKEN:
+        return "❌ Erro: O token da NVIDIA não foi configurado no arquivo .env!"
+
+    headers = {
+        "Authorization": f"Bearer {NVIDIA_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1024
+    }
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(NVIDIA_API_URL, headers=headers, json=payload, timeout=60) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"]
+                else:
+                    error_data = await resp.text()
+                    return f"❌ Erro na API da NVIDIA (Status {resp.status}): {error_data}"
+        except Exception as e:
+            return f"❌ Erro ao se comunicar com a IA: {str(e)}"
+
+# ---------------------------------------------------------
 # MAIN BOT CLASS
 # ---------------------------------------------------------
 class DevBot(commands.Bot):
@@ -100,7 +137,7 @@ class DevBot(commands.Bot):
     async def weekly_summary(self):
         current_datetime = datetime.datetime.now()
         if current_datetime.weekday() == 6 and current_datetime.hour == 14 and current_datetime.minute == 0:
-            channel_id = os.getenv('DISCORD_CHANNEL_ID')
+            channel_id = os.getenv('DISCORD_LOG_CHANNEL_ID')
             if not channel_id:
                 return
             
@@ -158,7 +195,7 @@ class CustomLanguageModal(discord.ui.Modal, title='Qual linguagem?'):
         user_id = str(interaction.user.id)
         current_time = time.time()
         db_cursor.execute("INSERT INTO sessions (user_id, status, language, project_name, start_time, accumulated, ai_used, ai_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                       (user_id, 'ativo', self.language_input.value, self.project_name, current_time, 0.0, '', ''))
+                        (user_id, 'ativo', self.language_input.value, self.project_name, current_time, 0.0, '', ''))
         db_connection.commit()
         
         msg = (
@@ -176,7 +213,7 @@ class LanguageSelectionView(discord.ui.View):
         user_id = str(interaction.user.id)
         current_time = time.time()
         db_cursor.execute("INSERT INTO sessions (user_id, status, language, project_name, start_time, accumulated, ai_used, ai_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                       (user_id, 'ativo', selected_language, self.project_name, current_time, 0.0, '', ''))
+                        (user_id, 'ativo', selected_language, self.project_name, current_time, 0.0, '', ''))
         db_connection.commit()
         
         msg = (
@@ -248,7 +285,7 @@ class AITimeModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         ai_mins = self.ai_duration_input.value
         db_cursor.execute("UPDATE sessions SET status = 'finalizado', accumulated = ?, ai_used = ?, ai_time = ? WHERE id = ?", 
-                       (self.total_duration_seconds, self.ai_identifier, ai_mins, self.session_id))
+                        (self.total_duration_seconds, self.ai_identifier, ai_mins, self.session_id))
         db_connection.commit()
         
         minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
@@ -280,7 +317,7 @@ class CustomAIModal(discord.ui.Modal, title='Qual IA você usou?'):
         ai_mins = self.ai_duration_input.value
         ai_name = self.custom_ai_input.value
         db_cursor.execute("UPDATE sessions SET status = 'finalizado', accumulated = ?, ai_used = ?, ai_time = ? WHERE id = ?", 
-                       (self.total_duration_seconds, ai_name, ai_mins, self.session_id))
+                        (self.total_duration_seconds, ai_name, ai_mins, self.session_id))
         db_connection.commit()
         
         minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
@@ -335,7 +372,7 @@ class StopSessionView(discord.ui.View):
     @discord.ui.button(label="Não usei IA", emoji="🚫", style=discord.ButtonStyle.danger, row=1)
     async def button_no_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
         db_cursor.execute("UPDATE sessions SET status = 'finalizado', accumulated = ?, ai_used = 'Não', ai_time = '0' WHERE id = ?", 
-                       (self.total_duration_seconds, self.session_id))
+                        (self.total_duration_seconds, self.session_id))
         db_connection.commit()
 
         minutes, seconds = divmod(int(round(self.total_duration_seconds)), 60)
@@ -513,6 +550,33 @@ async def command_ranking(interaction: discord.Interaction):
         posicao += 1
 
     await interaction.response.send_message(embed=ranking_embed)
+
+# ---------------------------------------------------------
+# NOVO COMANDO: INTEGRAÇÃO COM IA NVIDIA
+# ---------------------------------------------------------
+@bot_instance.tree.command(name="ia", description="Faça uma pergunta para o assistente de IA Nemotron.")
+@app_commands.describe(pergunta="Sua dúvida sobre código ou projeto.")
+async def command_ia(interaction: discord.Interaction, pergunta: str):
+    # O defer é essencial porque a IA demora uns segundos para pensar
+    await interaction.response.defer(ephemeral=False)
+    
+    resposta = await ask_nvidia(pergunta)
+    
+    # O Discord limita mensagens a 2000 caracteres.
+    # Se a IA enviar um código muito longo, mandamos como arquivo!
+    if len(resposta) > 1950:
+        filename = f"resposta_ia_{interaction.user.id}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(resposta)
+            
+        await interaction.followup.send(
+            content=f"🗣️ **Você perguntou:** {pergunta}\n\n*A resposta foi muito grande, então coloquei neste arquivo para você ler melhor:*",
+            file=discord.File(filename)
+        )
+        os.remove(filename) # Limpa o arquivo depois de enviar
+    else:
+        await interaction.followup.send(f"🗣️ **Você perguntou:** {pergunta}\n\n{resposta}")
+
 
 # Project management group
 project_group = app_commands.Group(name="project", description="Gerencie seus projetos de estudo.")
